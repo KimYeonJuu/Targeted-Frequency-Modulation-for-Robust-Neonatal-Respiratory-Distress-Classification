@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Environments
+.venv/
+venv/
+env/
+SCI/
+.conda/
+
+# Data and clinical files
+Data/
+data/
+datasets/
+images/
+masks/
+*.dcm
+*.nii
+*.nii.gz
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+
+# Training artifacts
+checkpoints/
+outputs/
+runs/
+wandb/
+logs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Generated tables/predictions
+predictions/
+tables/
+figures/
+*.xlsx
+
+# Compiled extensions/build artifacts
+build/
+*.so
+*.c
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
