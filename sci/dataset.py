@@ -34,13 +34,13 @@ class ImageBaseDataset(Dataset):
         x = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         if x is None:
             print(f"Warning: Failed to read image at {img_path}. Skipping.")
-            return None  # 이미지가 없으면 None 반환하여 호출자가 건너뛰도록 처리
+            return None  # Return None when the image cannot be loaded so the caller can skip it.
 
         # transform images
         x = self._resize_img(x, img_size)
         img = Image.fromarray(x).convert("RGB")
         if self.transform is not None:
-            # albumentations transform인지 확인
+            # Check whether the transform is an Albumentations transform.
             if 'albumentations' in str(type(self.transform)).lower():
                 img_np = np.array(img)
                 img = self.transform(image=img_np)['image']
@@ -123,10 +123,23 @@ class CheXpertImageDataset(ImageBaseDataset):
         # if img_type != "All":
         #     self.df = self.df[self.df[CHEXPERT_VIEW_COL] == img_type]
 
-        # get path
-        self.df[CHEXPERT_PATH_COL] = self.df[CHEXPERT_PATH_COL].apply(
-            lambda x: os.path.join(CHEXPERT_DATA_DIR, "/".join(x.split("/")[1:]))
-        )
+        # Resolve paths from absolute paths, paths relative to the current
+        # directory, or paths relative to CHEXPERT_DATA_DIR.
+        def _resolve_chexpert_path(path_value):
+            path_value = str(path_value)
+            if os.path.isabs(path_value) or os.path.exists(path_value):
+                return path_value
+
+            candidates = [
+                os.path.join(CHEXPERT_DATA_DIR, path_value),
+                os.path.join(CHEXPERT_DATA_DIR, "/".join(path_value.split("/")[1:])),
+            ]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    return candidate
+            return candidates[0]
+
+        self.df[CHEXPERT_PATH_COL] = self.df[CHEXPERT_PATH_COL].apply(_resolve_chexpert_path)
 
         # fill na with 0s
         self.df = self.df.fillna(0)
@@ -144,7 +157,7 @@ class CheXpertImageDataset(ImageBaseDataset):
         y = list(row[CHEXPERT_COMPETITION_TASKS])
         y = torch.tensor(y)
 
-        dummy_mask = torch.zeros((self.image_size, self.image_size), dtype=torch.uint8)
+        dummy_mask = torch.ones((self.image_size, self.image_size), dtype=torch.uint8)
         return x, y, dummy_mask
 
     def __len__(self):
@@ -158,7 +171,7 @@ class RDSImageDataset(ImageBaseDataset):
         self.use_blur = use_blur
         self.ksize = ksize
         self.sigma = sigma
-        # CSV 파일 읽기
+        # Read the CSV file.
         if data_path is not None:
             self.df = pd.read_csv(data_path)
         else:
@@ -171,38 +184,38 @@ class RDSImageDataset(ImageBaseDataset):
         super(RDSImageDataset, self).__init__(split, data_path, transform)
 
     def __getitem__(self, index):
-        # 재귀적으로 유효한 샘플이 나올 때까지 시도
+        # Retry until a valid sample is found.
         row = self.df.iloc[index]
         # img_path = row["filepath"]
         img_path = row["Path"]
         mask_path = img_path.replace('_seg_crop.png', '_seg_crop_mask.png')
         
-        # blur 처리가 활성화되어 있고 _crop_virtual.png 파일인 경우
+        # Apply blur only when enabled and the path is a virtual crop.
         if self.use_blur and "_crop_virtual.png" in img_path:
             try:
-                # blur 처리 적용 (내부에서 grayscale로 읽음)
+                # Apply blur; the helper reads the image as grayscale.
                 blurred_gray = apply_blur_with_annotation(img_path, ksize=(self.ksize, self.ksize), sigma=self.sigma)
                 
                 if blurred_gray is None:
                     print(f"Warning: Failed to apply blur at {img_path}")
                     return self.__getitem__((index + 1) % len(self.df))
                 
-                # 이미지 리사이즈 (기존과 동일하게 2D array 전달)
+                # Resize the image using the same 2D-array path.
                 blurred_gray = self._resize_img(blurred_gray, self.image_size)
                 
-                # PIL 이미지로 변환 후 RGB로 변환 (기존 방식과 동일)
+                # Convert to PIL and RGB.
                 img = Image.fromarray(blurred_gray).convert("RGB")
                 
-                # transform 적용
+                # Apply transform.
                 if self.transform is not None:
-                    # albumentations transform인지 확인
+                    # Check whether the transform is an Albumentations transform.
                     if 'albumentations' in str(type(self.transform)).lower():
                         img_np = np.array(img)
                         img = self.transform(image=img_np)['image']
                     else:
                         img = self.transform(img)
                 
-                # tensor 타입 처리
+                # Handle tensor dtype.
                 if isinstance(img, torch.Tensor) and img.dtype == torch.uint8:
                     img = img.float() / 255.0
                     
@@ -210,10 +223,10 @@ class RDSImageDataset(ImageBaseDataset):
                     
             except Exception as e:
                 print(f"Error applying blur to {img_path}: {e}")
-                # blur 처리에 실패하면 일반적인 방법으로 읽기
+                # Fall back to ordinary image loading if blur fails.
                 x = self.read_from_jpg(img_path, self.image_size)
         else:
-            # blur 처리가 비활성화되어 있거나 _crop_virtual.png가 아닌 경우
+            # Use ordinary image loading when blur is disabled or the file is not a virtual crop.
             x = self.read_from_jpg(img_path, self.image_size)
             
         if x is None:
@@ -224,7 +237,7 @@ class RDSImageDataset(ImageBaseDataset):
         y = list(row[RDS_TASKS])
         y = torch.tensor(y, dtype=torch.float)
 
-        # 4) 마스크 읽고 resize → tensor (H, W)
+        # Read and resize the mask, then convert it to a tensor (H, W).
         mask_img = Image.open(mask_path).convert("L")
         mask_img = mask_img.resize((self.image_size, self.image_size), Image.NEAREST)
         mask = TF.to_tensor(mask_img).squeeze(0)  # (H, W)

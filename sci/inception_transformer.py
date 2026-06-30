@@ -242,7 +242,7 @@ class HighMixerCBAM(HighMixer):
     def __init__(self, dim, kernel_size=3, stride=1, padding=1, reduction_ratio=16, **kwargs):
         super().__init__(dim, kernel_size=kernel_size, stride=stride, padding=padding, **kwargs)
         fused_ch = self.cnn_dim + self.pool_dim
-        # 공식 CBAM 클래스 사용
+        # Use the official CBAM class.
         self.cbam = CBAM(
             gate_channels=fused_ch,
             reduction_ratio=reduction_ratio,
@@ -356,7 +356,7 @@ class Block(nn.Module):
 
         self.use_gtfe = use_gtfe
         if self.use_gtfe:
-            # dim == token 차원 == spatial 채널 수
+            # dim is the token dimension and spatial channel count.
             self.gtfe = GTFE(
                 in_channels=dim,
                 embed_dim=dim,
@@ -366,12 +366,12 @@ class Block(nn.Module):
             
     def forward(self, x):
         if self.use_gtfe:
-            # GTFE는 (B,C,H,W) 입력을 기대하므로 순서 변환
+            # GTFE expects (B,C,H,W), so change the tensor order.
             x_sp = x.permute(0,3,1,2).contiguous()      # (B, C, H, W)
             x_sp = self.gtfe(x_sp)                      # (B, C, H, W)
             x = x_sp.permute(0,2,3,1).contiguous()      # (B, H, W, C)
 
-        # 이제 기존 Block 연산
+        # Continue with the standard block operations.
         if self.use_layer_scale:
             x = x + self.drop_path(self.layer_scale_1 * self.attn(self.norm1(x)))
             x = x + self.drop_path(self.layer_scale_2 * self.mlp(self.norm2(x)))

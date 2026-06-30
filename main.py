@@ -40,7 +40,7 @@ from sci.utils import (
 from tqdm import tqdm
 
 
-# 환경 변수
+# Environment variables
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
 
@@ -78,15 +78,15 @@ def test_only(
     batch_size: int = 32,
     use_wandb: bool = False,
 ) -> None:
-    # 최신 체크포인트 로드
+    # Load the latest checkpoint.
     ckpts = glob.glob(os.path.join(ckpt_dir, "*.pth"))
     if not ckpts:
-        raise FileNotFoundError(f"체크포인트({ckpt_dir}/*.pth)를 찾을 수 없습니다.")
+        raise FileNotFoundError(f"No checkpoint found at {ckpt_dir}/*.pth.")
     latest_ckpt = max(ckpts, key=os.path.getmtime)
     model.load_state_dict(torch.load(latest_ckpt, map_location=device))
     print(f"[Test] Loaded checkpoint: {latest_ckpt}")
 
-    # 테스트 데이터셋
+    # Test dataset
     if dataset == "chexpert":
         test_dataset = CheXpertImageDataset(
             split="test", data_path=args.test_data_path, transform=val_transform
@@ -104,7 +104,7 @@ def test_only(
         worker_init_fn=worker_init,
     )
 
-    # 평가
+    # Evaluation
     model.eval()
     criterion = nn.CrossEntropyLoss()
     test_loss = 0.0
@@ -116,7 +116,7 @@ def test_only(
             labels_idx = labels.argmax(dim=1).to(device)
             masks = mask.to(device)
 
-            # === SGN 외부 마스크 주입 ===
+            # Inject the external lung mask into SGN modules.
             lung_mask = masks
             if lung_mask.dim() == 3:
                 lung_mask = lung_mask.unsqueeze(1)
@@ -169,98 +169,98 @@ def test_only(
 def main() -> None:
     parser = argparse.ArgumentParser(description="CNN Image-only Training & Testing")
 
-    # 경로
-    parser.add_argument("--train_data_path", type=str, required=True, help="학습 데이터 경로")
-    parser.add_argument("--val_data_path", type=str, required=True, help="검증 데이터 경로")
-    parser.add_argument("--test_data_path", type=str, required=True, help="테스트 데이터 경로")
-    parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints", help="체크포인트 저장 디렉토리")
-    parser.add_argument("--save_model", type=str, default="model", help="모델 저장 이름")
+    # Paths
+    parser.add_argument("--train_data_path", type=str, required=True, help="Path to the training CSV")
+    parser.add_argument("--val_data_path", type=str, required=True, help="Path to the validation CSV")
+    parser.add_argument("--test_data_path", type=str, required=True, help="Path to the test CSV")
+    parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints", help="Directory for saving checkpoints")
+    parser.add_argument("--save_model", type=str, default="model", help="Run name used for saved checkpoints")
 
-    # 실행/환경
-    parser.add_argument("--project_name", type=str, default="SCI-RDS", help="Wandb 프로젝트 이름")
+    # Runtime settings
+    parser.add_argument("--project_name", type=str, default="SCI-CheXpert", help="Weights & Biases project name")
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases")
     parser.add_argument("--train", action="store_true", help="Run training")
     parser.add_argument("--test", action="store_true", help="Run testing")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--data_parallel", action="store_true", help="DataParallel 사용")
-    parser.add_argument("--gpu", type=str, default="0", help='사용할 GPU 번호 (예: "0,1")')
+    parser.add_argument("--data_parallel", action="store_true", help="Enable torch.nn.DataParallel")
+    parser.add_argument("--gpu", type=str, default="0", help='GPU IDs to use, e.g., "0" or "0,1"')
 
-    # 모델/데이터
-    parser.add_argument("--model_name", type=str, required=True, help="timm 모델 이름 (e.g., tf_efficientnet_b0)")
-    parser.add_argument("--dataset", type=str, required=True, help="데이터셋 종류")
-    parser.add_argument("--batch_size", type=int, default=64, help="배치 크기")
-    parser.add_argument("--num_epochs", type=int, default=30, help="학습 에폭 수")
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="학습률")
+    # Model and data
+    parser.add_argument("--model_name", type=str, required=True, help="Model name, e.g., tf_efficientnet_b0")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--num_epochs", type=int, default=30, help="Number of training epochs")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-6, help="Weight decay")
     parser.add_argument(
         "--freeze_backbone",
         type=str,
         default="OFF",
         choices=["ON", "OFF"],
-        help='"ON" → backbone freeze, "OFF" → full fine-tuning',
+        help='"ON" freezes the backbone, "OFF" enables full fine-tuning',
     )
 
-    # SGN 블록/삽입 스펙
+    # SGN replacement/insertion specification
     parser.add_argument(
         "--block-selection",
         "--sb",
         dest="sb_spec",
         type=str,
         default="",
-        help="Spectral Block 교체 지정(1-기반). 예) '1:1,1:2;2:1' or '1:*;2:1-2'",
+        help="Spectral block replacement specification using 1-based indices, e.g., '1:1,1:2;2:1' or '1:*;2:1-2'",
     )
 
-    # === SGN 하이퍼파라미터 ===
-    parser.add_argument("--sgn_mode", choices=["grid", "block"], default="grid", help="SGN 주파수 처리 모드")
-    parser.add_argument("--sgn_grid_size", type=str, default="16x16", help="grid 모드 고정 격자 크기(HxW)")
-    parser.add_argument("--sgn_tau", type=float, default=0.25, help="소프트 게이팅 온도")
-    parser.add_argument("--sgn_amp", type=float, default=1.0, help="강조 강도 (scale = 1 + amp * gate)")
-    parser.add_argument("--sgn_block", type=str, default="16x16", help="block 모드 블록 크기(HxW)")
-    parser.add_argument("--sgn_stride", type=str, default="same", help='block 모드 stride(HxW), "same"이면 block과 동일')
+    # SGN hyperparameters
+    parser.add_argument("--sgn_mode", choices=["grid", "block"], default="grid", help="SGN frequency-processing mode")
+    parser.add_argument("--sgn_grid_size", type=str, default="16x16", help="Fixed grid size for grid mode, formatted as HxW")
+    parser.add_argument("--sgn_tau", type=float, default=0.25, help="Soft gating temperature")
+    parser.add_argument("--sgn_amp", type=float, default=1.0, help="Modulation strength, scale = 1 + amp * gate")
+    parser.add_argument("--sgn_block", type=str, default="16x16", help="Block size for block mode, formatted as HxW")
+    parser.add_argument("--sgn_stride", type=str, default="same", help='Block-mode stride, formatted as HxW; "same" matches the block size')
 
-    # === SGN outlier 선택 하이퍼파라미터 ===
-    parser.add_argument("--sgn_ratio_thresh", type=float, default=0.02, help="에너지 비율 임계값")
-    parser.add_argument("--sgn_outlier_topk", type=int, default=0, help="상위 K 주파수만 선택(0 비활성)")
-    parser.add_argument("--sgn_min_radius", type=int, default=1, help="저주파 제외 반경")
-    parser.add_argument("--sgn_max_radius", type=int, default=-1, help="최대 반경 제한(-1 비활성)")
-    parser.add_argument("--sgn_mask_off", action="store_true", help="outlier 마스킹 비활성")
+    # SGN outlier-selection hyperparameters
+    parser.add_argument("--sgn_ratio_thresh", type=float, default=0.02, help="Energy-ratio threshold")
+    parser.add_argument("--sgn_outlier_topk", type=int, default=0, help="Select only the top-K frequencies; 0 disables top-K selection")
+    parser.add_argument("--sgn_min_radius", type=int, default=1, help="Minimum radius for excluding low-frequency bins")
+    parser.add_argument("--sgn_max_radius", type=int, default=-1, help="Maximum radius; -1 disables the upper bound")
+    parser.add_argument("--sgn_mask_off", action="store_true", help="Disable outlier masking")
 
-    # 부가 모듈/증강
-    parser.add_argument("--use_cbam", action="store_true", help="CBAM 사용")
-    parser.add_argument("--use_gtfe", action="store_true", help="GTFE 사용")
+    # Optional modules and augmentations
+    parser.add_argument("--use_cbam", action="store_true", help="Enable CBAM")
+    parser.add_argument("--use_gtfe", action="store_true", help="Enable GTFE")
 
-    parser.add_argument("--grid_shuffle_2_0_5", action="store_true", help="Grid Shuffle 사용")
-    parser.add_argument("--grid_shuffle_3_0_5", action="store_true", help="Grid Shuffle 사용")
-    parser.add_argument("--grid_shuffle_2_1_0", action="store_true", help="Grid Shuffle 사용")
-    parser.add_argument("--grid_shuffle_3_1_0", action="store_true", help="Grid Shuffle 사용")
+    parser.add_argument("--grid_shuffle_2_0_5", action="store_true", help="Enable Grid Shuffle")
+    parser.add_argument("--grid_shuffle_3_0_5", action="store_true", help="Enable Grid Shuffle")
+    parser.add_argument("--grid_shuffle_2_1_0", action="store_true", help="Enable Grid Shuffle")
+    parser.add_argument("--grid_shuffle_3_1_0", action="store_true", help="Enable Grid Shuffle")
 
-    parser.add_argument("--mixup", action="store_true", help="Mixup 사용")
-    parser.add_argument("--stylemix", action="store_true", help="StyleMix 사용")
-    parser.add_argument("--guidedmix", action="store_true", help="GuidedMix 사용")
-    parser.add_argument("--lungmix", action="store_true", help="LungMix 사용")
-    parser.add_argument("--mix_prob", type=float, default=0.5, help="Mix 계열 적용 확률")
+    parser.add_argument("--mixup", action="store_true", help="Enable MixUp")
+    parser.add_argument("--stylemix", action="store_true", help="Enable StyleMix")
+    parser.add_argument("--guidedmix", action="store_true", help="Enable GuidedMix")
+    parser.add_argument("--lungmix", action="store_true", help="Enable LungMix")
+    parser.add_argument("--mix_prob", type=float, default=0.5, help="Probability of applying mix-based augmentation")
     parser.add_argument("--alpha", type=float, default=1.0, help="Mixup alpha")
     parser.add_argument("--r", type=float, default=0.5, help="StyleMix r")
     parser.add_argument("--condition", type=str, default="greedy", help="GuidedMix condition")
     parser.add_argument("--saliency_mode", type=str, default="grad", help="GuidedMix saliency mode")
 
-    parser.add_argument("--fft_aug", action="store_true", help="8×8 block FFT augment 적용 여부")
-    parser.add_argument("--fft_aug_prob", type=float, default=0.5, help="FFT augment 적용 확률 (0~1)")
-    parser.add_argument("--stride_1", action="store_true", help="Stride 1 사용")
+    parser.add_argument("--fft_aug", action="store_true", help="Enable 8x8 block FFT augmentation")
+    parser.add_argument("--fft_aug_prob", type=float, default=0.5, help="Probability of applying FFT augmentation")
+    parser.add_argument("--stride_1", action="store_true", help="Use stride 1")
 
     # Outlier-Band Aug
-    parser.add_argument("--outlier_csv", type=str, default="", help="이상치 밴드 CSV 경로")
+    parser.add_argument("--outlier_csv", type=str, default="", help="Path to the outlier-band CSV")
     parser.add_argument("--outlier_prob", type=float, default=0.5)
     parser.add_argument("--outlier_scale", type=float, default=2.0)
     parser.add_argument("--outlier_topk", type=int, default=0)
     parser.add_argument("--outlier_subset_k", type=int, default=0)
     parser.add_argument("--inner_margin", type=int, default=1)
     parser.add_argument("--pre_apodize", type=float, default=1.0)
-    parser.add_argument("--post_hard_mask", action="store_true", help="IFFT 후 배경 0 유지")
+    parser.add_argument("--post_hard_mask", action="store_true", help="Keep the background zero after IFFT")
 
     args = parser.parse_args()
 
-    # === SGN 기본값 설정 ===
+    # Set SGN defaults.
     bh, bw = parse_hw(args.sgn_block) or (16, 16)
     stride = parse_hw(args.sgn_stride)
     gh, gw = parse_hw(args.sgn_grid_size) or (16, 16)
@@ -280,27 +280,27 @@ def main() -> None:
     )
     # ========================
 
-    # GPU 선택
+    # GPU selection
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     print(f"Using GPU: {args.gpu}")
 
-    # 기본 실행: train
+    # Default action: train.
     if not args.train and not args.test:
         args.train = True
 
     set_seed(args.seed)
 
-    # 체크포인트 경로
+    # Checkpoint path
     ckpt_root = args.checkpoint_dir
     ckpt_dir = os.path.join(ckpt_root, args.model_name, args.save_model)
     print(f"ckpt_dir : {ckpt_dir}")
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    # 디바이스/프리즈 설정
+    # Device and freeze settings
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     freeze_flag = args.freeze_backbone.upper() == "ON"
 
-    # 모델 생성
+    # Model construction
     if args.model_name == "iformer_small":
         model = iformer_small(pretrained=True, num_classes=2, use_cbam=args.use_cbam, use_gtfe=args.use_gtfe)
         if args.stride_1:
@@ -339,12 +339,12 @@ def main() -> None:
 
     # DataParallel
     if args.data_parallel and torch.cuda.device_count() > 1:
-        print(f"[Info] DataParallel 사용, GPU: {args.gpu}")
+        print(f"[Info] DataParallel enabled, GPU: {args.gpu}")
         model = nn.DataParallel(model)
 
     model.to(device)
 
-    # wandb 초기화
+    # Initialize Weights & Biases.
     run = None
     if args.use_wandb and (args.train or args.test):
         run = wandb.init(
@@ -352,28 +352,29 @@ def main() -> None:
         name=args.save_model,
         config=vars(args),
         reinit=True,
-        save_code=False,   # 자동 스냅샷 대신 아래에서 명시적으로 올림
+        save_code=False,   # Code artifacts are added explicitly below.
     )
         
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))  # main.py가 있는 폴더
+        script_dir = os.path.dirname(os.path.abspath(__file__))  # Directory containing main.py
     except NameError:
         script_dir = os.getcwd()
 
     main_code_dir = os.path.join(script_dir, "main_code")
 
-    # 폴더 통째로
-    if os.path.isdir(main_code_dir):
+    # Add the full folder.
+    if run is not None and os.path.isdir(main_code_dir):
         run.log_code(root=main_code_dir)
 
-    # main.py만 따로 (실행 디렉토리 전체가 너무 크면 include_fn으로 main.py만 올림)
+    # Add main.py separately if the full execution directory is too large.
     def _only_main(path):
         try:
             return os.path.samefile(path, os.path.join(script_dir, "main.py"))
         except Exception:
             return os.path.abspath(path) == os.path.abspath(os.path.join(script_dir, "main.py"))
 
-    run.log_code(root=script_dir, include_fn=_only_main)
+    if run is not None:
+        run.log_code(root=script_dir, include_fn=_only_main)
 
     if args.use_wandb and args.train:
         wandb.watch(model)
@@ -389,18 +390,18 @@ def main() -> None:
             subset_k=args.outlier_subset_k,
             inner_margin=args.inner_margin,
             pre_apodize=args.pre_apodize,
-            post_hard_mask=True,  # 폐 외부 0 유지
+            post_hard_mask=True,  # Keep the region outside the lung at zero.
         )
     # =============================
 
-    # 시드 고정(글로벌) - 원본 유지
+    # Set the global seed.
     SEED = 42
     random.seed(SEED)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
     torch.cuda.manual_seed_all(SEED)
 
-    # 변환
+    # Transforms
     train_transform = A.Compose(
         [
             A.Resize(256, 256),
@@ -438,9 +439,9 @@ def main() -> None:
     # Training
     # -----------------------------------------
     if args.train:
-        print("=== Training 시작 ===")
+        print("=== Training started ===")
 
-        # 데이터셋
+        # Dataset
         if args.dataset == "chexpert":
             train_dataset = CheXpertImageDataset(
                 split="train", data_path=args.train_data_path, transform=train_transform
@@ -487,7 +488,7 @@ def main() -> None:
                 if outlier_aug is not None:
                     images = outlier_aug(images)
 
-                # === SGN 외부(원본기반) 폐 마스크 주입 ===
+                # Inject the external lung mask into SGN modules.
                 lung_mask = masks.to(device)
                 if lung_mask.dim() == 3:
                     lung_mask = lung_mask.unsqueeze(1)
@@ -583,7 +584,7 @@ def main() -> None:
                     labels_idx = labels.argmax(dim=1).to(device)
                     masks = mask.to(device)
 
-                    # === SGN 외부 마스크 주입 ===
+                    # Inject the external lung mask into SGN modules.
                     lung_mask = masks.to(device)
                     if lung_mask.dim() == 3:
                         lung_mask = lung_mask.unsqueeze(1)
@@ -641,7 +642,7 @@ def main() -> None:
                 print(f"New best_val_acc: {best_val_acc:.4f}, saved to {ckpt_path}")
 
                 if args.use_wandb:
-                    # 경로 안전하게 확보
+                    # Resolve paths safely.
                     try:
                         script_dir = os.path.dirname(os.path.abspath(__file__))
                     except NameError:
@@ -649,38 +650,38 @@ def main() -> None:
                     main_py = os.path.join(script_dir, "main.py")
                     main_code_dir = os.path.join(script_dir, "main_code")
 
-                    # 아티팩트 생성 → 파일/폴더 추가 → 한 번만 로그
+                    # Create an artifact, add files/folders, and log it once.
                     model_art = wandb.Artifact(
                         name=f"{args.model_name}_{args.save_model}",
                         type="model",
-                        description="best checkpoint + main.py + ./main_code/ 전체",
+                        description="Best checkpoint, main.py, and the full ./main_code directory",
                         metadata={"epoch": int(epoch + 1), "val_acc": float(best_val_acc)},
                     )
 
-                    # 체크포인트 파일
+                    # Checkpoint file
                     model_art.add_file(ckpt_path)
 
-                    # main.py 파일
+                    # main.py file
                     if os.path.isfile(main_py):
                         model_art.add_file(main_py)
                     else:
-                        print(f"[W&B] main.py를 찾지 못했습니다: {main_py}")
+                        print(f"[W&B] main.py not found: {main_py}")
 
-                    # ./main_code 폴더 전체
+                    # Full ./main_code directory
                     if os.path.isdir(main_code_dir):
                         model_art.add_dir(main_code_dir)
                     else:
-                        print(f"[W&B] main_code 폴더를 찾지 못했습니다: {main_code_dir}")
+                        print(f"[W&B] main_code directory not found: {main_code_dir}")
 
                     wandb.log_artifact(model_art, aliases=["best", f"epoch-{epoch+1}"])
 
-                    print("=== Training 완료 ===")
+                    print("=== Training finished ===")
 
     # -----------------------------------------
     # Testing
     # -----------------------------------------
     if args.test:
-        print("=== Testing 시작 ===")
+        print("=== Testing started ===")
         test_only(
             args=args,
             model=model,
@@ -691,7 +692,7 @@ def main() -> None:
             batch_size=args.batch_size,
             use_wandb=args.use_wandb,
         )
-        print("=== Testing 완료 ===")
+        print("=== Testing finished ===")
 
 
 if __name__ == "__main__":

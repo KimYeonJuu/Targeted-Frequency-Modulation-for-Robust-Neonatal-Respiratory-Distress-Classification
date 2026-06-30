@@ -13,12 +13,12 @@ def _normalize_fb_mode(mode) -> str:
 
 
 # ===============================
-# 공통 유틸: freeze 모드 해석/적용
+# Shared utility: parse and apply freeze mode.
 # ===============================
 def _apply_freeze_policy(backbone: nn.Module, mode: str):
     """
-    mode == "OFF": backbone 전체 학습
-    mode == "ON" : backbone은 전부 freeze하되 Spectral 계열 모듈만 학습 허용
+    mode == "OFF": train the full backbone.
+    mode == "ON": freeze the backbone and train only spectral modules.
     """
     mode = mode.upper() if isinstance(mode, str) else ("ON" if bool(mode) else "OFF")
 
@@ -27,11 +27,11 @@ def _apply_freeze_policy(backbone: nn.Module, mode: str):
             p.requires_grad = True
         return
 
-    # 1) 전체 동결
+    # 1) Freeze the full backbone.
     for p in backbone.parameters():
         p.requires_grad = False
 
-    # 2) Spectral 계열만 다시 풀기 (교체/삽입 공통)
+    # 2) Re-enable only spectral modules, shared by replacement and insertion modes.
     for m in backbone.modules():
         if isinstance(m, (SpectralBlock, SpectralGatingNetwork, HFSwinBlockAdapter)):
             for p in m.parameters():
@@ -39,7 +39,7 @@ def _apply_freeze_policy(backbone: nn.Module, mode: str):
 
 
 # ===============================
-# 기본 이진 분류기 (ViT / ResNet)
+# Basic binary classifier (ViT / ResNet).
 # ===============================
 class MedCLIPBinaryClassifier(nn.Module):
     def __init__(self, backbone: str = "vit", num_classes: int = 2, dropout: float = 0.0, freeze_backbone="OFF"):
@@ -51,12 +51,12 @@ class MedCLIPBinaryClassifier(nn.Module):
             self.backbone_type = "vit"
         elif bb == "resnet":
             self.backbone = MedCLIPVisionModel()
-            embed_dim = 512  # projection head 출력
+            embed_dim = 512  # projection-head output
             self.backbone_type = "resnet"
         else:
             raise ValueError("backbone must be 'vit' or 'resnet'.")
 
-        # freeze 정책 적용 (ViT/ResNet은 SGN이 없으므로 ON이면 전체 freeze)
+        # Apply the freeze policy. ViT/ResNet do not include SGN, so ON freezes the full backbone.
         fb_mode = _normalize_fb_mode(freeze_backbone)
         if self.backbone_type in ("vit", "resnet"):
             if fb_mode == "ON":
@@ -78,12 +78,12 @@ class MedCLIPBinaryClassifier(nn.Module):
 
 
 # ==========================================
-# Spectral Block 어댑터 (HF Swin 호환 래퍼)
+# Spectral Block adapter, compatible with HF Swin.
 # ==========================================
 class HFSwinBlockAdapter(nn.Module):
     """
-    - 입력: hidden_states (B, N, C), input_dimensions=(H, W)
-    - 출력: (hidden_states,) 또는 (hidden_states, None) if output_attentions
+    - Input: hidden_states (B, N, C), input_dimensions=(H, W)
+    - Output: (hidden_states,) or (hidden_states, None) when output_attentions is enabled
     """
     def __init__(self, dim: int, num_heads: int, mlp_ratio: float, sb_id=None):
         super().__init__()
@@ -96,16 +96,16 @@ class HFSwinBlockAdapter(nn.Module):
 
 
 # ==================================================
-# 교체 모드: "stage:block" 지정으로 Swin 블록 교체
+# Replacement mode: replace Swin blocks specified as "stage:block".
 # ==================================================
 def parse_block_selection(sb_spec: str, depths) -> set:
     """
-    예시(1-기반):
+    Examples using 1-based indices:
       "1:1,1:2;2:1"  -> S1 B1,B2 / S2 B1
-      "1:*;2:1-2"    -> S1 전체 / S2 B1..2
+      "1:*;2:1-2"    -> all S1 blocks / S2 B1..2
       "3:4,3:6,4:2"  -> S3 B4,B6 / S4 B2
-      "2"            -> S2 전체
-    반환: set[(stage0, block0)]
+      "2"            -> all S2 blocks
+    Return: set[(stage0, block0)].
     """
     if not sb_spec or not sb_spec.strip():
         return set()
@@ -120,16 +120,16 @@ def parse_block_selection(sb_spec: str, depths) -> set:
             s_txt, b_txt = it, "*"
 
         if not s_txt.isdigit():
-            raise ValueError(f"잘못된 stage 표기: '{it}' (1..{num_stages})")
+            raise ValueError(f"Invalid stage specification: '{it}' (1..{num_stages})")
         s1 = int(s_txt)
         if not (1 <= s1 <= num_stages):
-            raise ValueError(f"stage 범위 오류: {s1} (1..{num_stages})")
+            raise ValueError(f"stage out of range: {s1} (1..{num_stages})")
         s0 = s1 - 1
         depth = depths[s0]
 
         def add_block(b1):
             if not (1 <= b1 <= depth):
-                raise ValueError(f"stage {s1} block 범위 오류: {b1} (1..{depth})")
+                raise ValueError(f"stage {s1} block out of range: {b1} (1..{depth})")
             sel.add((s0, b1 - 1))
 
         if b_txt in ("*", ""):
@@ -138,7 +138,7 @@ def parse_block_selection(sb_spec: str, depths) -> set:
         elif "-" in b_txt:
             a, b = b_txt.split("-", 1)
             if not (a.isdigit() and b.isdigit()):
-                raise ValueError(f"range 표기 오류: '{it}'")
+                raise ValueError(f"Invalid range specification: '{it}'")
             a1, b1 = int(a), int(b)
             if a1 > b1:
                 a1, b1 = b1, a1
@@ -146,7 +146,7 @@ def parse_block_selection(sb_spec: str, depths) -> set:
                 add_block(k)
         else:
             if not b_txt.isdigit():
-                raise ValueError(f"block 표기 오류: '{it}'")
+                raise ValueError(f"Invalid block specification: '{it}'")
             add_block(int(b_txt))
     return sel
 
@@ -154,36 +154,36 @@ def parse_block_selection(sb_spec: str, depths) -> set:
 def apply_spectral_blocks_swin(stages, *, config, sb_spec: str):
     """
     stages: hf_model.encoder.layers (list[SwinStage])
-    sb_spec: "1:1,2:1" 등 (교체 대상 지정)
+    sb_spec: "1:1,2:1" style replacement target specification
     """
     depths = list(getattr(config, "depths"))
     selections = parse_block_selection(sb_spec, depths)
     if not selections:
-        print("[SB-REPLACE] 지정 없음 (원본 Swin 유지).")
+        print("[SB-REPLACE] no specification provided; keeping the original Swin.")
         return
 
     for s0, b0 in sorted(selections):
         stage = stages[s0]
         depth = len(stage.blocks)
         if not (0 <= b0 < depth):
-            raise ValueError(f"[SB-REPLACE] stage {s0+1} block {b0+1} 범위 초과 (1..{depth})")
+            raise ValueError(f"[SB-REPLACE] stage {s0+1} block {b0+1} out of range (1..{depth})")
         dim = config.embed_dim * (2 ** s0)
         heads = config.num_heads[s0] if isinstance(config.num_heads, (list, tuple)) else config.num_heads
         mlp_r = getattr(config, "mlp_ratio", 4.0)
         stage.blocks[b0] = HFSwinBlockAdapter(dim=dim, num_heads=heads, mlp_ratio=mlp_r, sb_id=f"S{s0+1}B{b0+1}")
-        print(f"[SB-REPLACE] stage {s0+1} block {b0+1} → Spectral Block 교체 완료")
+        print(f"[SB-REPLACE] stage {s0+1} block {b0+1} -> replaced with Spectral Block")
 
 
 class MedCLIPVisionModelViT_SGN(MedCLIPVisionModelViT):
-    """Swin 블록 교체 모드"""
+    """Swin block replacement mode."""
     def __init__(self, checkpoint=None, medclip_checkpoint=None, sb_spec: str = ""):
         super().__init__(checkpoint=checkpoint, medclip_checkpoint=medclip_checkpoint)
         hf_model = self.model
         if not (hasattr(hf_model, "encoder") and hasattr(hf_model.encoder, "layers")):
-            raise NotImplementedError("Swin 백본만 지원합니다.")
+            raise NotImplementedError("Only Swin backbones are supported.")
         cfg, stages = hf_model.config, hf_model.encoder.layers
         apply_spectral_blocks_swin(stages, config=cfg, sb_spec=sb_spec)
-        print(f"[SGN-Swin REPLACE] '{sb_spec}' 적용 (embed_dim={cfg.embed_dim}, depths={cfg.depths})")
+        print(f"[SGN-Swin REPLACE] '{sb_spec}' applied (embed_dim={cfg.embed_dim}, depths={cfg.depths})")
 
 
 class MedCLIPBinaryClassifier_SGN(nn.Module):
@@ -202,12 +202,12 @@ class MedCLIPBinaryClassifier_SGN(nn.Module):
 
 
 # ==================================================
-# 삽입 모드: Stage 시작부(LinearEmb/PatchMerging) 직후 삽입
+# Insertion mode: insert immediately after the stage input module, LinearEmb or PatchMerging.
 # ==================================================
 def parse_sb_insert_spec(spec: str, num_stages: int) -> Dict[int, int]:
     """
-    예) "1:1" (S1에 1개 삽입), "1:1-2"(S1에 2개), "1:2,3:1"
-    반환: dict[stage0] = count
+    Examples: "1:1" inserts one block in S1, "1:1-2" inserts two in S1, "1:2,3:1".
+    Return: dict[stage0] = count.
     """
     if not spec or not spec.strip():
         return {}
@@ -215,29 +215,29 @@ def parse_sb_insert_spec(spec: str, num_stages: int) -> Dict[int, int]:
     out = {}
     for tok in [t for t in spec.split(",") if t]:
         if ":" not in tok:
-            raise ValueError(f"'{tok}': 'stage:count' 형식이어야 합니다.")
+            raise ValueError(f"'{tok}': must follow the 'stage:count' format.")
         s_txt, c_txt = tok.split(":", 1)
         if not s_txt.isdigit():
-            raise ValueError(f"스테이지 표기 오류: {s_txt}")
+            raise ValueError(f"Invalid stage specification: {s_txt}")
         s1 = int(s_txt)
         if not (1 <= s1 <= num_stages):
-            raise ValueError(f"stage 범위 오류: {s1} (1..{num_stages})")
+            raise ValueError(f"stage out of range: {s1} (1..{num_stages})")
         s0 = s1 - 1
 
         if "-" in c_txt:
             a, b = c_txt.split("-", 1)
             if not (a.isdigit() and b.isdigit()):
-                raise ValueError(f"count 범위 표기 오류: {c_txt}")
+                raise ValueError(f"Invalid count range specification: {c_txt}")
             a1, b1 = int(a), int(b)
             if a1 > b1:
                 a1, b1 = b1, a1
             count = b1 - a1 + 1
         else:
             if not c_txt.isdigit():
-                raise ValueError(f"count 표기 오류: {c_txt}")
+                raise ValueError(f"Invalid count specification: {c_txt}")
             count = int(c_txt)
             if count <= 0:
-                raise ValueError("count는 1 이상이어야 합니다.")
+                raise ValueError("count must be at least 1.")
 
         out[s0] = out.get(s0, 0) + count
     return out
@@ -255,40 +255,40 @@ class _DownsampleThenPreSB(nn.Module):
         self.pre_sbs = pre_sbs  # ModuleList of HFSwinBlockAdapter
 
     def forward(self, hidden_states, input_dimensions, head_mask=None, output_attentions=False):
-        # 1) 원래 downsample 호출: 반환 형식(텐서/튜플)은 버전에 따라 다름
+        # 1) Call the original downsample; return type may be tensor or tuple depending on version.
         ds_out = self.downsample(hidden_states, input_dimensions)
 
-        # 2) hidden_states / (H,W) 추출 (SB에 필요)
+        # 2) Extract hidden_states and (H,W), required by the spectral block.
         if isinstance(ds_out, tuple):
             hs = ds_out[0]
-            # stage1(Identity)면 해상도 유지, 그 외엔 가능한 경우 튜플 내에서 갱신된 해상도 사용
+            # Keep resolution for stage 1 identity; otherwise use the updated tuple resolution when available.
             if isinstance(self.downsample, _IdentityDownsample):
                 new_hw = input_dimensions
             else:
                 if len(ds_out) >= 2 and isinstance(ds_out[1], tuple):
                     new_hw = ds_out[1]
                 else:
-                    # 안전장치: patch merging 가정 하에 1/2 (패딩 고려해 올림)
+                    # Fallback: assume patch merging halves the resolution, rounding up for padding.
                     H, W = input_dimensions
                     new_hw = ((H + 1) // 2, (W + 1) // 2)
         else:
-            # 텐서만 반환하는 버전
+            # Version returning only a tensor.
             hs = ds_out
             if isinstance(self.downsample, _IdentityDownsample):
-                new_hw = input_dimensions  # stage1: 해상도 그대로
+                new_hw = input_dimensions  # stage 1 keeps the same resolution.
             else:
-                H, W = input_dimensions  # patch merging: 1/2 가정
+                H, W = input_dimensions  # Assume patch merging halves the resolution.
                 new_hw = ((H + 1) // 2, (W + 1) // 2)
 
-        # 3) Patch Merging(또는 Identity) 직후 SB 연속 적용
+        # 3) Apply spectral blocks after Patch Merging or Identity.
         for sb in self.pre_sbs:
             hs = sb(hs, new_hw, None, None, False)[0]
 
-        # 4) 원래 downsample의 반환 '형식'을 그대로 보존해서 돌려줌
+        # 4) Preserve the original downsample return format.
         if isinstance(ds_out, tuple):
             out_list = list(ds_out)
             out_list[0] = hs
-            # 해상도를 튜플로 돌려주는 버전이면 갱신된 new_hw를 넣어줌
+            # If the version returns resolution in the tuple, insert the updated new_hw.
             if len(out_list) >= 2 and isinstance(out_list[1], tuple):
                 out_list[1] = new_hw
             return tuple(out_list)
@@ -298,78 +298,78 @@ class _DownsampleThenPreSB(nn.Module):
 
 def insert_spectral_before_stage_blocks(stages, *, config, sb_insert_spec: str):
     """
-    Stage별 블록 '시작 전에' SB를 k개 삽입:
-      S1: Linear Embedding → SB×k → SwinBlock×2
-      S2: Patch Merging → SB×k → SwinBlock×2
-      S3: Patch Merging → SB×k → SwinBlock×6
-      S4: Patch Merging → SB×k → SwinBlock×2
+    Insert k spectral blocks before the blocks in each stage:
+      S1: Linear Embedding -> SB x k -> SwinBlock x 2
+      S2: Patch Merging -> SB x k -> SwinBlock x 2
+      S3: Patch Merging -> SB x k -> SwinBlock x 6
+      S4: Patch Merging -> SB x k -> SwinBlock x 2
     """
     depths = list(getattr(config, "depths"))
     plan = parse_sb_insert_spec(sb_insert_spec, len(depths))
     if not plan:
-        print("[SB-INSERT] 지정 없음 (원본 Swin 유지).")
+        print("[SB-INSERT] no specification provided; keeping the original Swin.")
         return
 
     for s0, count in sorted(plan.items()):
         stage = stages[s0]
-        # 각 stage의 입력 채널 (= 블록들이 받는 dim)
+        # Input channels for each stage, i.e. the dim received by the blocks.
         dim = config.embed_dim * (2 ** s0)
         heads = config.num_heads[s0] if isinstance(config.num_heads, (list, tuple)) else config.num_heads
         mlp_r = getattr(config, "mlp_ratio", 4.0)
 
-        # stage 시작부에서 먼저 통과시킬 SB 리스트
+        # Spectral blocks applied first at the stage entrance.
         pre_sbs = nn.ModuleList([
             HFSwinBlockAdapter(
                 dim=dim, num_heads=heads, mlp_ratio=mlp_r, sb_id=f"S{s0+1}I{k+1}"
             ) for k in range(count)
         ])
-        # stage 객체에 보관
+        # Store on the stage object.
         stage._pre_sbs = pre_sbs
 
-        # 원래 forward 백업(한 번만)
+        # Backup the original forward once.
         if not hasattr(stage, "_orig_forward"):
             stage._orig_forward = stage.forward
 
-        # 새 forward: SB들 → 원래 stage.forward(블록들+stage 내부 로직)
+        # New forward: spectral blocks followed by the original stage.forward.
         def new_forward(self, hidden_states, input_dimensions, head_mask=None, output_attentions=False):
-            # SB들은 head_mask 없이 선적용
+            # Apply spectral blocks first without head_mask.
             for sb in self._pre_sbs:
                 hidden_states = sb(hidden_states, input_dimensions, None, None, False)[0]
-            # 이후는 원래 stage 로직 (블록들 루프, 필요시 stage 내부 downsample 등)
+            # Then run the original stage logic, including block loops and downsampling when needed.
             return self._orig_forward(hidden_states, input_dimensions, head_mask, output_attentions)
 
-        # 메서드 바인딩
+        # Bind the method.
         stage.forward = types.MethodType(new_forward, stage)
-        print(f"[SB-INSERT] Stage {s0+1}: 블록 시작 전에 SB ×{count} 삽입 (dim={dim})")
+        print(f"[SB-INSERT] Stage {s0+1}: insert SB x{count} before stage blocks (dim={dim})")
 
 
 class MedCLIPVisionModelViT_SGN_Inserted(MedCLIPVisionModelViT):
-    """Swin 시작부 삽입 모드"""
+    """Swin stage-entry insertion mode."""
     def __init__(
         self, checkpoint=None, medclip_checkpoint=None,
-        # 둘 다 받되, sb_insert_spec 우선 사용
+        # Accept both arguments, preferring sb_insert_spec.
         sb_insert_spec: str = "",
         sb_spec: str = ""
     ):
         super().__init__(checkpoint=checkpoint, medclip_checkpoint=medclip_checkpoint)
         hf_model = self.model
         if not (hasattr(hf_model, "encoder") and hasattr(hf_model.encoder, "layers")):
-            raise NotImplementedError("Swin 백본만 지원합니다.")
+            raise NotImplementedError("Only Swin backbones are supported.")
         cfg, stages = hf_model.config, hf_model.encoder.layers
-        plan_spec = sb_insert_spec if sb_insert_spec else sb_spec  # 호환
+        plan_spec = sb_insert_spec if sb_insert_spec else sb_spec  # Compatibility alias.
         insert_spectral_before_stage_blocks(stages, config=cfg, sb_insert_spec=plan_spec)
-        print(f"[SGN-Swin INSERT] '{plan_spec}' 적용 (embed_dim={cfg.embed_dim}, depths={cfg.depths})")
+        print(f"[SGN-Swin INSERT] '{plan_spec}' applied (embed_dim={cfg.embed_dim}, depths={cfg.depths})")
 
 
 class MedCLIPBinaryClassifier_SGN_Inserted(nn.Module):
     def __init__(
         self, num_classes: int = 2, dropout: float = 0.0, freeze_backbone="OFF",
-        # 둘 다 받되, sb_insert_spec 우선
+        # Accept both arguments, preferring sb_insert_spec.
         sb_insert_spec: str = "",
         sb_spec: str = ""
     ):
         super().__init__()
-        plan_spec = sb_insert_spec if sb_insert_spec else sb_spec  # 호환
+        plan_spec = sb_insert_spec if sb_insert_spec else sb_spec  # Compatibility alias.
         self.backbone = MedCLIPVisionModelViT_SGN_Inserted(sb_insert_spec=plan_spec)
         cfg = self.backbone.model.config
         embed_dim = getattr(cfg, "hidden_size", cfg.embed_dim * (2 ** (len(cfg.depths) - 1)))

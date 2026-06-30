@@ -38,16 +38,16 @@ def mixup(data, targets, alpha, n_classes):
 
 def stylemix(data, targets, alpha, n_classes, r):
     """
-    공식 StyleMix(train.py)과 동일한 StyleMixup 구현
+    StyleMixup implementation aligned with the official StyleMix train.py.
     Args:
         data (Tensor): (B, C, H, W)
         targets (LongTensor): (B,)
-        alpha (float): Beta 분포 파라미터
-        n_classes (int): 클래스 수
-        r (float): 콘텐츠/스타일 손실 가중치 (args.r)
+        alpha (float): beta-distribution parameter
+        n_classes (int): number of classes
+        r (float): content/style loss weight (args.r)
     Returns:
-        mixed (Tensor): (B, C, H, W) 증강 이미지
-        mixed_targets (Tensor): (B, n_classes) 혼합된 soft-label
+        mixed (Tensor): (B, C, H, W) augmented images
+        mixed_targets (Tensor): (B, n_classes) mixed soft labels
     """
     torch.cuda.empty_cache()
     
@@ -92,8 +92,8 @@ def stylemix(data, targets, alpha, n_classes, r):
     down = nn.Upsample(size=(H, W), mode='bilinear', align_corners=False)
     mixed = down(mixed224)
 
-    # 6) soft-label 계산
-    # content loss 분포 + style loss 분포을 가중합
+    # 6) Compute soft labels.
+    # Weighted combination of content-loss and style-loss distributions.
     content_dist = rc * t1 + (1 - rc) * t2
     style_dist   = rs * t1 + (1 - rs) * t2
     mixed_targets = r * content_dist + (1 - r) * style_dist
@@ -106,27 +106,27 @@ def stylemix(data, targets, alpha, n_classes, r):
 
 def pairing_wrapper(sc, condition='random', distance_metric='l2'):
     """
-    sc: (B,H,W) 실수형 saliency map tensor
+    sc: (B,H,W) real-valued saliency-map tensor
     condition: 'random' or 'greedy'
-    returns: 길이 B 의 인덱스 배열
+    returns: index array of length B
     """
     B, H, W = sc.shape
 
     if condition == 'greedy':
-        # 1) 거리 행렬 계산 (B×B)
-        #    distance_function flatten 해서 L2/cosine 등 거리를 계산
+        # 1) Compute the distance matrix (B x B).
+        #    distance_function flattens maps and computes L2/cosine-style distances.
         X = distance_function(sc, sc, distance_metric).cpu().numpy()
-        # 2) onecycle_cover 에 넘겨 실제 pairing 계산
+        # 2) Pass the matrix to onecycle_cover to compute pairing.
         sorted_indices = onecycle_cover(X)
     else:
-        # 무작위 섞기
+        # Random shuffle.
         sorted_indices = np.random.permutation(B)
 
     return sorted_indices
 
 def compute_grad_saliency(images: torch.Tensor, model: nn.Module, targets: torch.Tensor) -> torch.Tensor:
     """
-    Gradient 기반으로 saliency map 생성
+    Generate saliency maps from gradients.
     """
     images_var = images.clone().detach().requires_grad_(True).cuda()
     targets_cuda = targets.cuda()
@@ -139,11 +139,11 @@ def compute_grad_saliency(images: torch.Tensor, model: nn.Module, targets: torch
 
 def distance_function(a: torch.Tensor, b: torch.Tensor=None, distance_metric: str='l2') -> torch.Tensor:
     """
-    flattened saliency map a,b 간의 pairwise distance matrix를 반환합니다.
-    현재 'l2'만 지원합니다.
+    Return the pairwise distance matrix between flattened saliency maps a and b.
+    Only 'l2' is currently supported.
     Args:
       a: Tensor (B, H, W)
-      b: Tensor (B, H, W) or None (-> a와 동일)
+      b: Tensor (B, H, W) or None (same as a)
       distance_metric: 'l2'
     Returns:
       dist: Tensor (B, B)
@@ -154,7 +154,7 @@ def distance_function(a: torch.Tensor, b: torch.Tensor=None, distance_metric: st
     a_flat = a.reshape(B, -1)
     b_flat = b.reshape(B, -1)
     if distance_metric == 'l2':
-        # torch.cdist를 이용해 각 배치 간 L2 거리를 계산
+        # Use torch.cdist to compute pairwise L2 distances.
         return torch.cdist(a_flat, b_flat, p=2)
     else:
         raise NotImplementedError(f"Distance metric '{distance_metric}' not implemented")
@@ -167,27 +167,27 @@ def guidedmix(data: torch.Tensor,
               model: nn.Module = None,
               grad: torch.Tensor = None) -> (torch.Tensor, torch.Tensor):
     """
-    Unified GuidedMixup 함수. saliency_mode에 따라
-    - 'spectral': SpectralResidual 기반 saliency
-    - 'grad': gradient 기반 saliency (model 필요)
+    Unified GuidedMixup function. Depending on saliency_mode:
+    - 'spectral': SpectralResidual-based saliency
+    - 'grad': gradient-based saliency; requires model
     Args:
-      data         (Tensor): (B, C, H, W) 입력 배치
-      targets      (Tensor): (B,) 정수 레이블
-      n_classes    (int):    클래스 수
-      condition    (str):    'random' 또는 'greedy'
+      data         (Tensor): (B, C, H, W) input batch
+      targets      (Tensor): (B,) integer labels
+      n_classes    (int):    number of classes
+      condition    (str):    'random' or 'greedy'
       saliency_mode(str):    'spectral' or 'grad'
-      model        (nn.Module): grad 방식일 때 필요
-      grad         (Tensor): (B, H, W) 외부에서 계산된 saliency
+      model        (nn.Module): required for gradient mode
+      grad         (Tensor): (B, H, W) externally computed saliency
     Returns:
-      mixed        (Tensor): (B, C, H, W) 믹스 이미지
+      mixed        (Tensor): (B, C, H, W) mixed images
       mixed_tgt    (Tensor): (B, n_classes) soft-label
     """
     B, C, H, W = data.shape
 
-    # 1) Saliency Map 생성/할당
+    # 1) Generate or assign the saliency map.
     if saliency_mode == 'grad':
-        # gradient 기반
-        assert model is not None, "model을 제공해야 grad saliency를 계산할 수 있습니다"
+        # Gradient-based saliency.
+        assert model is not None, "model must be provided to compute gradient saliency"
         if grad is None:
             data_var = data.clone().detach().requires_grad_(True)
             outputs = model(data_var)
@@ -197,33 +197,33 @@ def guidedmix(data: torch.Tensor,
         else:
             sc = grad
     else:
-        # spectral residual 기반
+        # Spectral residual-based saliency.
         sc = sr.transform_spectral_residual(data)
 
-    # 후처리: blur + 정규화
+    # Post-process with blur and normalization.
     sc = TF.gaussian_blur(sc.unsqueeze(1), kernel_size=(7,7), sigma=(3,3)).squeeze(1)
     sc = sc / sc.sum(dim=[-1,-2], keepdim=True)
 
-    # 2) 페어링
+    # 2) Pairing.
     if condition == 'greedy':
-        # 거리행렬 + onecycle_cover
+        # Distance matrix plus onecycle_cover.
         X = distance_function(sc, sc, 'l2').cpu().numpy()
         idx = pairing(X)   # onecycle_cover alias
     else:
         idx = np.random.permutation(B)
 
-    # 3) 페어 데이터 취득
+    # 3) Fetch paired data.
     data_b = data[idx]
     sc_b   = sc[idx]
 
-    # 4) 픽셀별 mixing mask
+    # 4) Pixel-wise mixing mask.
     norm_sc = sc / (sc + sc_b).detach()  # (B, H, W)
     mask    = norm_sc.unsqueeze(1).expand(-1, C, -1, -1)  # (B, C, H, W)
 
-    # 5) 이미지 믹스
+    # 5) Mix images.
     mixed = mask * data + (1 - mask) * data_b
 
-    # 6) soft-label mix
+    # 6) Mix soft labels.
     t1  = onehot(targets, n_classes)
     t2  = onehot(targets[idx], n_classes)
     lam = norm_sc.mean(dim=[-1,-2]).unsqueeze(-1)
@@ -237,15 +237,15 @@ def guidedmix(data: torch.Tensor,
 
 def lung_half_mixup(
     data: torch.Tensor,      # (B, C, H, W)
-    targets: torch.Tensor,   # (B,) 정수 레이블
+    targets: torch.Tensor,   # (B,) integer labels
     n_classes: int
 ) -> (torch.Tensor, torch.Tensor):
     """
-    배치 내에서 랜덤 페어링을 한 뒤,
+    Randomly pair samples within the batch, then create:
       mix1 = [A_left | B_right]
       mix2 = [B_left | A_right]
-    두 개의 새로운 이미지를 만듭니다.
-    soft-label은 (0.5, 0.5)씩 섞어서 동일하게 씁니다.
+    two new images.
+    Soft labels are mixed evenly with weights (0.5, 0.5).
 
     Returns:
       mixed    : (2*B, C, H, W)
@@ -254,28 +254,28 @@ def lung_half_mixup(
     B, C, H, W = data.shape
     device = data.device
 
-    # 1) 랜덤 페어링
+    # 1) Random pairing.
     idx = torch.randperm(B, device=device)
     data_b = data[idx]
     tgt_b  = targets[idx]
 
-    # 2) soft-label 준비 (0.5*A + 0.5*B)
+    # 2) Prepare soft labels (0.5*A + 0.5*B).
     y1 = onehot(targets, n_classes)
     y2 = onehot(tgt_b,    n_classes)
     mix_tgt = 0.5 * y1 + 0.5 * y2   # (B, n_classes)
 
-    # 3) 왼/오른쪽 절반 분리
+    # 3) Split left and right halves.
     mid = W // 2
     A_left  = data[:, :, :, :mid]    # (B,C,H,mid)
     A_right = data[:, :, :, mid:]    # (B,C,H,W-mid)
     B_left  = data_b[:, :, :, :mid]
     B_right = data_b[:, :, :, mid:]
 
-    # 4) 두 가지 mix 생성
+    # 4) Create two mixed batches.
     mix1 = torch.cat([A_left,  B_right], dim=3)  # (B,C,H,W)
     mix2 = torch.cat([B_left,  A_right], dim=3)  # (B,C,H,W)
 
-    # 5) 배치 확장
+    # 5) Expand the batch.
     mixed    = torch.cat([mix1,    mix2],    dim=0)    # (2B, C, H, W)
     targets = torch.cat([mix_tgt, mix_tgt], dim=0)    # (2B, n_classes)
 

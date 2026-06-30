@@ -8,23 +8,23 @@ import torch.nn.functional as F
 from timm.models.layers import DropPath, trunc_normal_
 
 
-# ===== SGN 글로벌 기본값 =====
+# ===== SGN global defaults =====
 _SGN_DEFAULTS = dict(
     mode="grid",              # "grid" | "block"
-    grid_size=(16, 16),       # 격자 크기 (게이트 파라미터 해상도)
-    tau=0.25,                 # 게이팅 온도
+    grid_size=(16, 16),       # Grid size, i.e. gate-parameter resolution.
+    tau=0.25,                 # Gating temperature.
     amp=2.0,                  # scale = 1 + amp * gate
-    block_size=(16, 16),      # block 모드 커널
-    block_stride=None,        # None -> block_size와 동일(논오버랩)
+    block_size=(16, 16),      # Block-mode kernel.
+    block_stride=None,        # None -> same as block_size, non-overlapping.
 
-    # ▼ outlier 선택 옵션
-    use_outlier_mask=True,    # True면 이상치 밴드만 스케일 적용
-    ratio_thresh=0.02,        # 에너지 비율 임계값
-    outlier_topk=0,           # 상위 K (0이면 미사용)
-    min_radius=1,             # 저주파 제외(인덱스 좌표계 반경)
-    max_radius=-1,            # 최대 반경 제한(음수면 미사용)
+    # Outlier-selection options.
+    use_outlier_mask=True,    # If True, scale only outlier bands.
+    ratio_thresh=0.02,        # Energy-ratio threshold.
+    outlier_topk=0,           # Top K; 0 disables this option.
+    min_radius=1,             # Exclude low frequencies using index-coordinate radius.
+    max_radius=-1,            # Maximum radius; negative disables this option.
 
-    # ▼ 입력값 기반 마스크 임계값 (외부 마스크 없을 때만 사용)
+    # Input-derived mask threshold, used only when no external mask is provided.
     nz_threshold=1.0 / 255.0,
 )
 
@@ -47,29 +47,29 @@ class SpectralGatingNetwork(nn.Module):
         self.tau = float(cfg["tau"])
         self.amp = float(cfg["amp"])
 
-        # 격자 게이트(학습 파라미터): (Gh,Gw) -> (Hf,Wf)로 bilinear resize
+        # Grid gate parameters: bilinearly resize (Gh,Gw) to (Hf,Wf).
         self.Gh, self.Gw = cfg.get("grid_size", (16, 16))
         self.grid_logits = nn.Parameter(torch.zeros(self.Gh, self.Gw))
         nn.init.normal_(self.grid_logits, mean=0.0, std=0.02)
 
-        # block 모드 파라미터
+        # Block-mode parameters.
         self.block_h, self.block_w = cfg["block_size"]
         self.block_stride = cfg["block_stride"] or (self.block_h, self.block_w)
 
-        # outlier 선택 옵션
+        # Outlier-selection options.
         self.use_outlier_mask = bool(cfg.get("use_outlier_mask", True))
         self.ratio_thresh     = float(cfg.get("ratio_thresh", 0.02))
         self.outlier_topk     = int(cfg.get("outlier_topk", 0))
         self.min_radius       = int(cfg.get("min_radius", 1))
         self.max_radius       = int(cfg.get("max_radius", -1))
 
-        # 외부 마스크 없을 때 임계값
+        # Threshold used when no external mask is provided.
         self.nz_threshold = float(kwargs.get("nz_threshold", 1.0 / 255.0))
 
-    # ----------------- 내부 유틸 -----------------
+    # ----------------- internal utilities -----------------
     @staticmethod
     def _resize_mask(mask: torch.Tensor, H: int, W: int, ch_last: bool):
-        """mask: (B,1,h,w) → nearest resize → (B,1,H,W) 또는 (B,H,W,1)"""
+        """mask: (B,1,h,w) -> nearest resize -> (B,1,H,W) or (B,H,W,1)."""
         mask = F.interpolate(mask.float(), size=(H, W), mode="nearest")
         mask = (mask > 0.5).to(dtype=torch.float32)
         return mask.permute(0, 2, 3, 1).contiguous() if ch_last else mask
@@ -77,7 +77,7 @@ class SpectralGatingNetwork(nn.Module):
     def _pop_ext_mask(self):
         m = getattr(self, "_ext_mask", None)
         if m is not None:
-            delattr(self, "_ext_mask")  # 한 번만 사용
+            delattr(self, "_ext_mask")  # Use only once.
         return m
 
     def _scale_map_base(self, Hf: int, Wf: int, device):
@@ -95,7 +95,7 @@ class SpectralGatingNetwork(nn.Module):
         """
         Xf: (B, Hf, Wf, C) complex
         scale_2d: (Hf, Wf) real
-        반환: (B,Hf,Wf) per-batch scale with mask applied
+        Return: (B,Hf,Wf) per-batch scale with mask applied.
         """
         B, Hf, Wf, C = Xf.shape
         device = Xf.device
@@ -151,17 +151,17 @@ class SpectralGatingNetwork(nn.Module):
         out_scale[final_mask] = base[final_mask]
         return out_scale
 
-    # ----------------- 처리 경로 -----------------
+    # ----------------- processing paths -----------------
     def _grid_process(self, x, H, W):
         B, N, C = x.shape
         x_img = x.view(B, H, W, C).to(torch.float32)
 
-        # 1) 외부 마스크가 있으면 사용 → (B,H,W,1)
+        # 1) Use an external mask when available -> (B,H,W,1).
         ext = self._pop_ext_mask()
         if ext is not None:
-            hard = self._resize_mask(ext, H, W, ch_last=True)  # nearest, 이진화
+            hard = self._resize_mask(ext, H, W, ch_last=True)  # nearest-neighbor resize and binarization
         else:
-            # 2) 없으면 입력으로부터 임시 마스크 생성
+            # 2) Otherwise create a temporary mask from the input.
             g = x_img.mean(dim=-1, keepdim=True)                # (B,H,W,1)
             mn = g.amin(dim=(1, 2, 3), keepdim=True)
             mx = g.amax(dim=(1, 2, 3), keepdim=True)
@@ -169,18 +169,18 @@ class SpectralGatingNetwork(nn.Module):
             g_norm = (g - mn) / rng                              # [0,1]
             hard = (g_norm > self.nz_threshold).to(x_img.dtype)  # (B,H,W,1)
 
-        # FFT 전 마스킹
+        # Mask before FFT.
         x_in = x_img * hard
 
-        # FFT → gate → IFFT
+        # FFT -> gate -> IFFT.
         Xf = torch.fft.rfft2(x_in, dim=(1, 2), norm="ortho")    # (B,Hf,Wf,C)
         Hf, Wf = Xf.shape[1], Xf.shape[2]
         base_scale = self._scale_map_base(Hf, Wf, Xf.device)    # (Hf,Wf)
         scale_b    = self._apply_outlier_mask(Xf, base_scale)   # (B,Hf,Wf)
-        Xf = Xf * scale_b[..., None]                            # 이상치 밴드 강조
+        Xf = Xf * scale_b[..., None]                            # Scale outlier bands.
         x_rec = torch.fft.irfft2(Xf, s=(H, W), dim=(1, 2), norm="ortho").to(x.dtype)
 
-        # IFFT 후에도 배경 완전 제거
+        # Suppress the background again after IFFT.
         x_rec = x_rec * hard
 
         return x_rec.view(B, N, C)
@@ -189,12 +189,12 @@ class SpectralGatingNetwork(nn.Module):
         B, N, C = x.shape
         x_chw = x.view(B, H, W, C).permute(0, 3, 1, 2).contiguous().to(torch.float32)  # (B,C,H,W)
 
-        # 1) 외부 마스크가 있으면 사용 → (B,1,H,W)
+        # 1) Use an external mask when available -> (B,1,H,W).
         ext = self._pop_ext_mask()
         if ext is not None:
             hard = self._resize_mask(ext, H, W, ch_last=False)
         else:
-            # 2) 없으면 입력으로부터 임시 마스크 생성
+            # 2) Otherwise create a temporary mask from the input.
             g = x_chw.mean(dim=1, keepdim=True)                 # (B,1,H,W)
             mn = g.amin(dim=(2, 3), keepdim=True)
             mx = g.amax(dim=(2, 3), keepdim=True)
@@ -202,7 +202,7 @@ class SpectralGatingNetwork(nn.Module):
             g_norm = (g - mn) / rng                              # [0,1]
             hard = (g_norm > self.nz_threshold).to(x_chw.dtype)  # (B,1,H,W)
 
-        # FFT 전 마스킹
+        # Mask before FFT.
         x_chw_in = x_chw * hard
 
         unfold = nn.Unfold(kernel_size=(self.block_h, self.block_w), stride=self.block_stride)
@@ -227,16 +227,16 @@ class SpectralGatingNetwork(nn.Module):
         x_rec     = x_rec.view(B, L, C * bh * bw).transpose(1, 2).contiguous()     # (B,C*bh*bw,L)
         x_chw_rec = fold(x_rec)                                                    # (B,C,H,W)
 
-        # IFFT 후에도 배경 완전 제거
+        # Suppress the background again after IFFT.
         x_chw_rec = x_chw_rec * hard
 
         return x_chw_rec.permute(0, 2, 3, 1).contiguous().to(x.dtype).view(B, N, C)
 
-    # ----------------- 인터페이스 -----------------
+    # ----------------- interface -----------------
     def set_external_mask(self, mask: torch.Tensor):
         """
-        mask: (B,1,H0,W0) 또는 (B,H0,W0); 값 {0,1} 권장.
-        다음 forward '한 번'에만 사용됩니다.
+        mask: (B,1,H0,W0) or (B,H0,W0); values {0,1} are recommended.
+        It is used only for the next forward pass.
         """
         if mask.dim() == 3:
             mask = mask.unsqueeze(1)  # (B,1,H0,W0)
@@ -332,6 +332,6 @@ class Block(nn.Module):
                 m.bias.data.zero_()
 
     def forward(self, x, H, W):
-        x = x + self.drop_path(self.attn(self.norm1(x), H, W))  # SGN 경로
-        x = x + self.drop_path(self.mlp(self.norm2(x), H, W))   # PVT2-스타일 FFN
+        x = x + self.drop_path(self.attn(self.norm1(x), H, W))  # SGN path.
+        x = x + self.drop_path(self.mlp(self.norm2(x), H, W))   # PVT2-style FFN.
         return x
